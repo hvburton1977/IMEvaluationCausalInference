@@ -1,4 +1,16 @@
-% Developed by Henry Burton and Jack Baker for the 
+% Henry Burton and Jack Baker
+% July 23, 2023
+
+% This code was developed by Henry Burton (UCLA) and Jack Baker (Stanford). 
+% It takes the raw data files in .csv format and converts them to .mat files 
+% so that they can be used by the "EfficiencyEvaluation.m" and 
+% "SufficiencyEvaluation.m" scripts. It is meant to accompany the 
+% following paper:
+
+% Burton, H. V. and Baker, J. W. (2023) Evaluating the Effectiveness of 
+% Ground Motion Intensity Measures Through the Lens of Causal Inference. 
+% Earthquake Engineering Structural Dynamics (accepted for publication)
+
 
 clear all
 close all

@@ -1,0 +1,434 @@
+---
+title: "Ground Motion Intensity Measure Evaluation Using Causdal Inference"
+output: html_document
+date: '2023-07-23'
+author: "Henry Burton and Jack Baker"
+---
+
+# This code was developed by Henry Burton (UCLA) and Jack Baker (Stanford) to evaluate the effectiveness of ground motion intensity measures using causal infrerence. It is meant to accompany the following paper:
+
+# Burton, H. V. and Baker, J. W. (2023) Evaluating the Effectiveness of Ground Motion Intensity Measures Through the Lens of Causal Inference. Earthquake Engineering Structural Dynamics (accepted for publication)
+
+# Import libraries
+```{r, include = FALSE}
+# Import libraries
+library(randomForest)
+library(tictoc)
+library(EnvStats)
+```
+
+
+# Define directory paths and import data
+```{r}
+# Define path to base directory
+BaseDirectory = getwd()
+
+# Define path to directory with raw data (.csv files)
+InputDataDirectoryRaw = file.path(BaseDirectory,"Data","Raw")
+
+# Define path to directory with causal inference results
+ResultsDirectory = file.path(BaseDirectory,"Results","CausalInference")
+
+# Import data
+groundMotionSpectra <- read.csv(file.path(BaseDirectory,"Data","Raw","groundMotionSpectra.csv"),header = TRUE)
+groundMotionParameters <- read.csv(file.path(BaseDirectory,"Data","Raw","groundMotionParameters.csv"),header = TRUE)
+buildingInfo <- read.csv(file.path(BaseDirectory,"Data","Raw","BuildingInfo.csv"),header = TRUE)
+PSDRResponses <- list(read.csv(file.path(BaseDirectory,"Data","Raw","1StoryPSDR.csv"),header = TRUE),
+                      read.csv(file.path(BaseDirectory,"Data","Raw","5StoryPSDR.csv"),header = TRUE),
+                      read.csv(file.path(BaseDirectory,"Data","Raw","9StoryPSDR.csv"),header = TRUE),
+                      read.csv(file.path(BaseDirectory,"Data","Raw","14StoryPSDR.csv"),header = TRUE),
+                      read.csv(file.path(BaseDirectory,"Data","Raw","19StoryPSDR.csv"),header = TRUE))
+PFAResponses <- list(read.csv(file.path(BaseDirectory,"Data","Raw","1StoryPFA.csv"),header = TRUE),
+                      read.csv(file.path(BaseDirectory,"Data","Raw","5StoryPFA.csv"),header = TRUE),
+                      read.csv(file.path(BaseDirectory,"Data","Raw","9StoryPFA.csv"),header = TRUE),
+                      read.csv(file.path(BaseDirectory,"Data","Raw","14StoryPFA.csv"),header = TRUE),
+                      read.csv(file.path(BaseDirectory,"Data","Raw","19StoryPFA.csv"),header = TRUE))
+```
+
+# Specify miscellaneous input variables
+```{r}
+# Number of buildings
+NBuildings <- length(buildingInfo$numberOfStories)
+
+# Number of IMs
+NIMs <- 4
+
+# Number of ground motions
+Ngm <- 240
+
+# Factor to convert pga from cm/s^2 to g
+pgaFactor <- 0.00101971621
+
+# Define factors associated with start and end periods for computing Saavg
+TStartFactor <- 0.2
+TEndFactor <- 3.0
+
+# Random forest parameters
+Mtry <- 2
+NTrees <- 500
+
+```
+
+# Define function used to scale the IMs
+```{r}
+# Define function used to scale the IMs
+scaleIMs <- function(PGA,PGV,SaT1,Saavg,NBuildings) {
+  # Define number of GMs used
+  noOfGMs <- length(PGA)
+  
+  
+  # Initialize arrays used to store SaT1 and Saavg
+  scaledSaT1 <- matrix(0,noOfGMs,NBuildings)
+  scaledSaavg <- matrix(0,noOfGMs,NBuildings)
+  
+  # Scale PGA and PGV based on maximum values
+  scaledPGA <- PGA/max(PGA)
+  scaledPGV <- PGV/max(PGV)
+    
+  # Scale SaT1 abnd Saavg based on maximum values
+  for (j in 1:NBuildings) {
+    scaledSaT1[,j] <- SaT1[,j]/max(SaT1[,j])
+    scaledSaavg[,j] <- Saavg[,j]/max(Saavg[,j])
+  }
+  # Create output array
+  output <- list(scaledPGA,scaledPGV,scaledSaT1,scaledSaavg)
+  return(output)  
+}
+
+
+
+```
+
+
+# Define function used to extract IMs
+```{r}
+# Define function used to extract IMs
+extractIMs <- function(mainIndexes,NBuildings,buildingInfo,groundMotionSpectra,groundMotionParameters,pgaFactor) {
+  
+  # Specify the number of ground motions
+  noOfGMsUsed <- length(mainIndexes)
+    
+  # Initialize array used to store all SaT1 and Saavg values
+  AllSaT1 <- matrix(0,Ngm,NBuildings)
+  AllSaavg <- matrix(0,Ngm,NBuildings)
+  
+  # Extract unscaled IMs
+  for (j in 1:NBuildings) {
+    # Building period
+    T1 <- buildingInfo$buildingPeriod[j]
+    
+    # Define start and end periods for computing Saavg
+    TStart <- TStartFactor*T1
+    TEnd <- TEndFactor*T1
+      
+    # Extract SaT1 values
+    AllSaT1[,j] <- matrix(t(groundMotionSpectra[which(groundMotionSpectra$Period == T1),2:241]),Ngm,1)
+    
+    # Extract Sa values to compute Saavg
+    SpectraForSaavg <- groundMotionSpectra[which.min(abs(groundMotionSpectra$Period - TStart)):which.min(abs(groundMotionSpectra$Period - TEnd)),2:(Ngm + 1)]
+    
+    
+    # Compute Saavg
+    for (i in 1:Ngm) AllSaavg[i,j] <- geoMean(SpectraForSaavg[,i])
+  }
+  
+  # Extract pga and convert to units of "g"
+  PGA <- as.matrix(pgaFactor*groundMotionParameters$PGA)
+
+  # Extract PGV
+  PGV <- as.matrix(groundMotionParameters$PGV)
+  
+  # Extract auxiliary IMs
+  pgaAux <- PGA[-mainIndexes]
+  pgvAux <- PGV[-mainIndexes]
+  saT1Aux <- AllSaT1[-mainIndexes,]
+  saavgAux <- AllSaavg[-mainIndexes,]
+  
+  # Extract main IMs
+  pgaMain <- PGA[mainIndexes]
+  pgvMain <- PGV[mainIndexes]
+  saT1Main <- AllSaT1[mainIndexes,]
+  saavgMain <- AllSaavg[mainIndexes,]
+
+  # Create output array
+  output <- list(pgaAux,pgvAux,saT1Aux,saavgAux,pgaMain,pgvMain,saT1Main,saavgMain)
+  return(output)  
+}
+
+
+```
+
+
+
+# Normalize the responses by the maximum over all considered ground motions
+```{r}
+#Initialize lists used to store normalized EDPs 
+normalizedPSDRs <- vector(mode='list', length=NBuildings)
+normalizedPFAs <- vector(mode='list', length=NBuildings)
+
+# Loop over the number of buildings
+for (j in 1:NBuildings) {
+  
+  # Extract the number of stories for the current building
+  NStories <- buildingInfo$numberOfStories[j]
+
+  # Extract PSDR Response and PFA Response for current building
+  currentPSDRs <- PSDRResponses[[j]]
+  currentPFAs <- PFAResponses[[j]]
+  
+  # Initialize matrix used to store normalized EDPs for current building
+  currentNormalizedPSDRs <- matrix(0,NStories,Ngm)
+  currentNormalizedPFAs <- matrix(0,NStories + 1,Ngm)
+  
+  # Loop over the number of stories
+  for (i in 1:NStories) {
+    # Extract normalized peak responses
+    currentNormalizedPSDRs[i,] <- as.matrix(currentPSDRs[i,]/max(currentPSDRs[i,]),1,Ngm)
+    currentNormalizedPFAs[i,] <- as.matrix(currentPFAs[i,]/max(currentPFAs[i,]),1,Ngm)
+  }
+  
+  # Add normalized EDPs for current building to list
+  normalizedPSDRs[[j]] <- currentNormalizedPSDRs
+  normalizedPFAs[[j]] <- currentNormalizedPFAs
+}
+
+```
+# Extract maximum of the normalized peak responses
+```{r}
+# Initialize arrays used to store maxPSDRResponse and maxPFAResponse responses
+maxPSDRResponse <- matrix(0,Ngm,NBuildings)
+maxPFAResponse <- matrix(0,Ngm,NBuildings)
+
+# Loop over the number of buildings
+for (j in 1:NBuildings) {
+
+  # Extract PSDR Response and PFA Response for current building
+  currentPSDRs <- normalizedPSDRs[[j]]
+  currentPFAs <- normalizedPFAs[[j]]
+  
+  # Loop over the number of ground motions
+  for (i in 1:Ngm) {
+    # Extract peak responses
+    maxPSDRResponse[i,j] <- max(currentPSDRs[,i])
+    maxPFAResponse[i,j] <- max(currentPFAs[,i])
+  }
+}
+
+```
+
+# Perform causal inference considering only maxPSDR and maxPFA
+```{r}
+# Define indexes used for main set 
+mainIndexes <- matrix(sample(1:Ngm, Ngm/2, replace = F),Ngm/2,1)
+mainIndexes <- as.matrix(mainIndexes)
+
+# Call function used to extract main and auxiliary IM sets
+output <- extractIMs(mainIndexes,NBuildings,buildingInfo,groundMotionSpectra,groundMotionParameters,pgaFactor)
+
+# Define auxiliary IM set
+pgaAux <- output[[1]]
+pgvAux <- output[[2]]
+saT1Aux <- output[[3]]
+saavgAux <- output[[4]]
+
+# Define main IM set
+pgaMain <- output[[5]]
+pgvMain <- output[[6]]
+saT1Main <- output[[7]]
+saavgMain <- output[[8]]
+
+# Scale auxiliary IM set
+output <- scaleIMs(pgaAux,pgvAux,saT1Aux,saavgAux,NBuildings)
+pgaAux <- output[[1]]
+pgvAux <- output[[2]]
+saT1Aux <- output[[3]]
+saavgAux <- output[[4]]
+
+# Scale main IM set
+output <- scaleIMs(pgaMain,pgvMain,saT1Main,saavgMain,NBuildings)
+pgaMain <- output[[1]]
+pgvMain <- output[[2]]
+saT1Main <- output[[3]]
+saavgMain <- output[[4]]
+
+# Create main and auxiliary EDP sets
+psdrAux <- maxPSDRResponse[-mainIndexes,]
+pfaAux <- maxPFAResponse[-mainIndexes,]
+psdrMain <- maxPSDRResponse[mainIndexes,]
+pfaMain <- maxPFAResponse[mainIndexes,]
+
+# Create auxiliary causal parameters
+mAux <- groundMotionParameters$Magnitude[-mainIndexes]
+rAux <- groundMotionParameters$BooreJoynerDistance[-mainIndexes]
+epAux <- groundMotionParameters$epsilon1[-mainIndexes]
+vs30Aux <- groundMotionParameters$Vs30[-mainIndexes]
+
+# Create main causal parameters
+mMain <- groundMotionParameters$Magnitude[mainIndexes]
+rMain <- groundMotionParameters$BooreJoynerDistance[mainIndexes]
+epMain <- groundMotionParameters$epsilon1[mainIndexes]
+vs30Main <- groundMotionParameters$Vs30[mainIndexes]
+causalMain <- cbind(mMain,rMain,epMain,vs30Main)
+
+# Define array used to store maxPSDR and maxPFA causal effect
+causalEffectMaxPSDR <- matrix(0,NBuildings,NIMs)
+causalEffectMaxPFA <- matrix(0,NBuildings,NIMs)
+
+# Loop over the number of buildings
+for (j in 1:NBuildings) {
+  # Extract the SaT1 and Saavg for the current building
+  currentSaavgAux <- saavgAux[,j]
+  currentSaT1Aux <- saT1Aux[,j]
+  currentSaavgMain <- saavgMain[,j]
+  currentSaT1Main <- saT1Main[,j]
+  
+  # Assemble IMAux and IMMain
+  IMAux <- cbind(pgaAux,pgvAux,currentSaT1Aux,currentSaavgAux)
+  IMMain <- cbind(pgaMain,pgvMain,currentSaT1Main,currentSaavgMain)
+  
+  # Loop over the number of IMs
+  for (i in 1:NIMs) {
+    # Using the auxiliary data, construct RF model with M and R as features and IM as the response variable i.e., g(X)
+    currentIMRFModel <- randomForest(IMAux[,i] ~ mAux + 
+                                       rAux, mtry = Mtry,
+                                       na.action = na.omit,ntree = NTrees)
+  
+    # Use current RF model to predict the main data IM
+    predictedCurrentIM <- predict(currentIMRFModel, newdata = causalMain)
+          
+    # Using the auxiliary data, construct RF model with M and R as features and EDP as the response variable i.e., f(X)
+      #print(psdrAux[,j])
+    PSDRRFModel <- randomForest(psdrAux[,j] ~ mAux + 
+                                       rAux, mtry = Mtry,
+                                       na.action = na.omit,ntree = NTrees)
+    PFARFModel <- randomForest(pfaAux[,j] ~ mAux + rAux,
+                                       mtry = Mtry,na.action = na.omit,ntree = NTrees)
+      
+    # Use RF model to main data EDPs
+    predictedPSDR <- predict(PSDRRFModel, newdata = causalMain)
+    predictedPFA <- predict(PFARFModel, newdata = causalMain)
+        
+    # Compute the IM residuals
+    currentIMResiduals <- predictedCurrentIM - IMMain[,i]
+    
+    # Compute the EDP residuals
+    PSDRResiduals <- predictedPSDR - psdrMain[,j]
+    PFAResiduals <- predictedPFA - pfaMain[,j]
+        
+    # Regress EDP residuals against IM residuals
+    PSDRIMModel <- lm(PSDRResiduals ~ currentIMResiduals)
+    PFAIMModel <- lm(PFAResiduals ~ currentIMResiduals)
+        
+    # Compute the causal effect (CE)
+    causalEffectMaxPSDR[j,i] <- PSDRIMModel$coefficients[2]
+    causalEffectMaxPFA[j,i] <- PFAIMModel$coefficients[2]
+
+  }
+}
+
+# Print results
+print(causalEffectMaxPSDR)
+print(causalEffectMaxPFA)
+
+# Save results
+write.table(causalEffectMaxPSDR, file.path(BaseDirectory,"Results","CausalInference","causalEffectMaxPSDR.txt"), qu = F, row = F,col = F)
+write.table(causalEffectMaxPSDR, file.path(BaseDirectory,"Results","CausalInference","causalEffectMaxPFA.txt"), qu = F, row = F,col = F)
+
+
+
+
+```
+
+# Perform causal inference considering full profile response i.e., PSDR and PFA
+```{r}
+# Initialize list used to store causal effects
+causalEffectPSDR <- list()
+causalEffectPFA <- list()
+
+# Loop over the number of buildings
+for (j in 1:NBuildings) {
+  # Number of stories in current building
+  NStories <- buildingInfo$numberOfStories[j]
+  
+  # Define array used to store PSDR and PFA causal effect for current building
+  currentCausalEffectPSDR <- matrix(0,NStories,NIMs)
+  currentCausalEffectPFA <- matrix(0,NStories,NIMs)
+  currentR2FromCausalModelPSDR <- matrix(0,NStories,NIMs)
+  currentR2FromCausalModelPFA <- matrix(0,NStories,NIMs)
+  
+  # Loop over the number of stories
+  for (k in 1:NStories) {
+    # Extract the SaT1 and Saavg for the current building
+    currentSaavgAux <- saavgAux[,j]
+    currentSaT1Aux <- saT1Aux[,j]
+    currentSaavgMain <- saavgMain[,j]
+    currentSaT1Main <- saT1Main[,j]
+    
+    # Assemble IMAux and IMMain
+    IMAux <- cbind(pgaAux,pgvAux,currentSaT1Aux,currentSaavgAux)
+    IMMain <- cbind(pgaMain,pgvMain,currentSaT1Main,currentSaavgMain)
+    
+    # Extract PSDR and PFA for current building/story/floor
+    currentPSDR <- t(as.matrix(normalizedPSDRs[[j]][k,]))
+    currentPFA <- t(as.matrix(normalizedPFAs[[j]][k,]))
+    
+    # Create Main and Auxiliary EDP Sets
+    psdrAux <- currentPSDR[-mainIndexes]
+    pfaAux <- currentPFA[-mainIndexes]
+    psdrMain <- currentPSDR[mainIndexes]
+    pfaMain <- currentPFA[mainIndexes]
+    
+    # Loop over the number of IMs
+    for (i in 1:NIMs) {
+      # Using the auxiliary data, construct RF model with M and R as features and IM as the response variable i.e., g(X)
+      currentIMRFModel <- randomForest(IMAux[,i] ~ mAux + 
+                                       rAux, mtry = Mtry,
+                                       na.action = na.omit,ntree = NTrees)
+  
+      # Use current RF model to predict the main data IM
+      predictedCurrentIM <- predict(currentIMRFModel, newdata = causalMain)
+          
+      # Using the auxiliary data, construct RF model with  M and R as features and EDP as the response variable i.e., f(X)
+      PSDRRFModel <- randomForest(psdrAux ~ mAux + 
+                                       rAux, mtry = Mtry,
+                                       na.action = na.omit,ntree = NTrees)
+      PFARFModel <- randomForest(pfaAux ~ mAux + rAux,
+                                       mtry = Mtry,na.action = na.omit,ntree = NTrees)
+        
+      # Use RF model to main data EDPs
+      predictedPSDR <- predict(PSDRRFModel, newdata = causalMain)
+      predictedPFA <- predict(PFARFModel, newdata = causalMain)
+          
+      # Compute the IM residuals
+      currentIMResiduals <- predictedCurrentIM - IMMain[,i]
+      
+      # Compute the EDP residuals
+      PSDRResiduals <- predictedPSDR - psdrMain
+      PFAResiduals <- predictedPFA - pfaMain
+          
+      # Regress EDP residuals against IM residuals
+      PSDRIMModel <- lm(PSDRResiduals ~ currentIMResiduals)
+      PFAIMModel <- lm(PFAResiduals ~ currentIMResiduals)
+          
+      # Compute the causal effect (CE)
+      currentCausalEffectPSDR[k,i] <- PSDRIMModel$coefficients[[2]]
+      currentCausalEffectPFA[k,i] <- PFAIMModel$coefficients[[2]]
+      
+      # Extract the R^2 value
+      currentR2FromCausalModelPSDR[k,i] <- summary(PSDRIMModel)$r.squared
+      currentR2FromCausalModelPFA[k,i] <- summary(PFAIMModel)$r.squared
+      
+    }
+  }
+  # Append to list of causal effects
+  causalEffectPSDR[[j]] <- currentCausalEffectPSDR
+  causalEffectPFA[[j]] <- currentCausalEffectPFA
+  
+  # Write to file
+  filepath <- paste(file.path(BaseDirectory,"Results","CausalInference"),"/causalEffectPSDR",NStories,"Story.txt",sep = "", collapse = NULL)
+  write.table(currentCausalEffectPSDR,filepath, qu = F, row = F,col = F)
+  filepath <- paste(file.path(BaseDirectory,"Results","CausalInference"),"/causalEffectPFA",NStories,"Story.txt",sep = "", collapse = NULL)
+  write.table(currentCausalEffectPFA,filepath, qu = F, row = F,col = F)
+  
+}
+```
